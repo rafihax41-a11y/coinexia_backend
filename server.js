@@ -39,6 +39,7 @@ function err(res, message) {
 // ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use("/images", require("express").static(require("path").join(__dirname, "public", "images")));
 
 // Request logger (safe)
 app.use((req, res, next) => {
@@ -107,13 +108,14 @@ async function run() {
   // These endpoints MUST return JSON, even if dummy.
   // ───────────────────────────────────────────────────────────
 
-  // Used by ProfileController.getLanguageList()
+  // LanguageModel.fromJson expects message to be a Map with a "languages" key
   app.get("/api/language", (_req, res) => {
-    // Return list in message as many Laravel APIs do
-    return ok(res, [
-      { id: 1, name: "English", code: "en" },
-      { id: 2, name: "Bangla", code: "bn" },
-    ]);
+    return ok(res, {
+      languages: [
+        { id: 1, name: "English", short_name: "en", flag: "" },
+        { id: 2, name: "Bangla",  short_name: "bn", flag: "" },
+      ],
+    });
   });
 
   // Minimal dashboard stub (safe)
@@ -125,18 +127,27 @@ async function run() {
     });
   });
 
-  // Minimal transaction stub (safe)
+  // TransactionModel.fromJson expects message.transactions.data
   app.get("/api/transaction", authMiddleware, (_req, res) => {
     return ok(res, {
-      data: [],
-      next_page_url: null,
-      prev_page_url: null,
+      transactions: {
+        data: [],
+        current_page: 1,
+        last_page: 1,
+        next_page_url: null,
+        prev_page_url: null,
+      },
     });
   });
 
   // Module checking stub (safe)
   app.get("/api/module/checking", authMiddleware, (_req, res) => {
-    return ok(res, { enabled: true });
+    return ok(res, {
+      exchange_module: 1,
+      buy_module: 1,
+      sell_module: 1,
+      staking_module: 1,
+    });
   });
 
   // ───────────────────────────────────────────────────────────
@@ -268,21 +279,16 @@ async function run() {
   });
 
   // ───────────────────────────────────────────────────────────
-  // Currency Rate (Home screen)
+  // Currency Rate — CoinMarketModel expects message.result[]
   // ───────────────────────────────────────────────────────────
   app.get("/api/currency/rate", authMiddleware, (_req, res) => {
-    return res.json({
-      status: "success",
-      message: {
-        base: "USD",
-        updated_at: new Date().toISOString(),
-        rates: {
-          BTC: 65000,
-          ETH: 3500,
-          SOL: 150,
-          USDT: 1,
-        },
-      },
+    return ok(res, {
+      result: [
+        { name: "Bitcoin",  image: "http://10.0.2.2:3000/images/bitcoin.png",  currency: "BTC",  today_price: "65000", previous_price: "64000", percentage_change: "1.2", sign: "+" },
+        { name: "Ethereum", image: "http://10.0.2.2:3000/images/ethereum.png", currency: "ETH",  today_price: "3500",  previous_price: "3520",  percentage_change: "0.6", sign: "-" },
+        { name: "Solana",   image: "http://10.0.2.2:3000/images/sol.png",     currency: "SOL",  today_price: "150",   previous_price: "145",   percentage_change: "3.1", sign: "+" },
+        { name: "Tether",   image: "http://10.0.2.2:3000/images/ethereum.png", currency: "USDT", today_price: "1",     previous_price: "1",     percentage_change: "0.0", sign: "+" },
+      ],
     });
   });
 
@@ -302,16 +308,16 @@ async function run() {
   });
 
   // ───────────────────────────────────────────────────────────
-  // Balance (fix $null issue)
+  // Balance — BalanceListModel expects message.wallets[] + totalDollarEqual
   // ───────────────────────────────────────────────────────────
   app.get("/api/get/balance", authMiddleware, (_req, res) => {
-    return res.json({
-      status: "success",
-      message: {
-        balance: 0,
-        currencySymbol: "$",
-        currency: "USD",
-      },
+    return ok(res, {
+      wallets: [
+        { balance: "0", currencyName: "Bitcoin",  currencyCode: "BTC",  currencyImage: "http://10.0.2.2:3000/images/bitcoin.png",  dollarEqual: "0" },
+        { balance: "0", currencyName: "Ethereum", currencyCode: "ETH",  currencyImage: "http://10.0.2.2:3000/images/ethereum1.png", dollarEqual: "0" },
+        { balance: "0", currencyName: "Tether",   currencyCode: "USDT", currencyImage: "http://10.0.2.2:3000/images/bitcoin.png",  dollarEqual: "0" },
+      ],
+      totalDollarEqual: "0",
     });
   });
 
@@ -319,12 +325,50 @@ async function run() {
   // Portfolio
   // ───────────────────────────────────────────────────────────
   app.get("/api/portfolio", authMiddleware, (_req, res) => {
-    return res.json({
-      status: "success",
-      message: {
-        total_value: 0,
-        items: [],
-      },
+    return ok(res, { total_value: 0, items: [] });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Currency chart — market_controller expects message.currencies + message.rates
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/all/currency/chart", authMiddleware, (_req, res) => {
+    return ok(res, {
+      currencies: [
+        { id: 1, code: "BTC", name: "Bitcoin",  symbol: "BTC" },
+        { id: 2, code: "ETH", name: "Ethereum", symbol: "ETH" },
+      ],
+      rates: {},
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Pusher config stub
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/pusher/config", authMiddleware, (_req, res) => {
+    return ok(res, { key: "", cluster: "mt1", enabled: false });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Staking — StakingResponse.fromJson shape
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/staking", authMiddleware, (_req, res) => {
+    return ok(res, {
+      unlock_day: 0,
+      pools: [],
+      stakes: { data: [], current_page: 1, last_page: 1 },
+      currencies: [],
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Staking statics — StakeStatistics.fromJson shape
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/staking/statics", authMiddleware, (_req, res) => {
+    return ok(res, {
+      total_staked: 0,
+      stakeStats: { total_staked: 0, total_rewards: 0 },
+      todayReward: 0,
+      stakes: [],
     });
   });
 
