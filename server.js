@@ -1,16 +1,367 @@
 require("dotenv").config();
 const express = require("express");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
+// ─────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────
 const app = express();
-
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+const MONGODB_URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.DB_NAME || "coinexia";
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
-app.get("/", (req, res) => {
-  res.send("Coinexia backend running 🚀");
+if (!MONGODB_URI) {
+  console.error("❌ MONGODB_URI is not defined in .env");
+  process.exit(1);
+}
+if (!JWT_SECRET) {
+  console.error("❌ JWT_SECRET is not defined in .env");
+  process.exit(1);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers (Laravel-style responses)
+// ─────────────────────────────────────────────────────────────
+function ok(res, message) {
+  return res.status(200).json({ status: "success", message });
+}
+function err(res, message) {
+  return res.status(200).json({ status: "error", message });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Middleware
+// ─────────────────────────────────────────────────────────────
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// Request logger (safe)
+app.use((req, res, next) => {
+  res.on("finish", () => {
+    console.log(`[${res.statusCode}] ${req.method} ${req.originalUrl}`);
+  });
+  next();
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// ─────────────────────────────────────────────────────────────
+// MongoDB Client
+// ─────────────────────────────────────────────────────────────
+const client = new MongoClient(MONGODB_URI, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
+function signToken(user) {
+  return jwt.sign(
+    { id: user._id.toString(), username: user.username, email: user.email },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+}
+
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization || "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return err(res, "No token provided");
+  }
+  const token = authHeader.slice("Bearer ".length).trim();
+  try {
+    req.user = jwt.verify(token, JWT_SECRET); // { id, username, email }
+    return next();
+  } catch {
+    return err(res, "Invalid or expired token");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────
+async function run() {
+  await client.connect();
+  console.log("✅ Connected to MongoDB");
+  console.log("🔥 RUNNING_PRODUCTION_SAFE_SERVER");
+
+  const db = client.db(DB_NAME);
+  const users = db.collection("users");
+
+  // Indexes
+  await users.createIndex({ email: 1 }, { unique: true });
+  await users.createIndex({ username: 1 }, { unique: true });
+
+  // ───────────────────────────────────────────────────────────
+  // Health + Root
+  // ───────────────────────────────────────────────────────────
+  app.get("/health", (_req, res) => ok(res, "OK"));
+  app.get("/", (_req, res) => ok(res, "Coinexia backend running 🚀"));
+
+  // ───────────────────────────────────────────────────────────
+  // Stability endpoints (to prevent Flutter crashes)
+  // These endpoints MUST return JSON, even if dummy.
+  // ───────────────────────────────────────────────────────────
+
+  // Used by ProfileController.getLanguageList()
+  app.get("/api/language", (_req, res) => {
+    // Return list in message as many Laravel APIs do
+    return ok(res, [
+      { id: 1, name: "English", code: "en" },
+      { id: 2, name: "Bangla", code: "bn" },
+    ]);
+  });
+
+  // Minimal dashboard stub (safe)
+  app.get("/api/dashboard", authMiddleware, (_req, res) => {
+    return ok(res, {
+      notice: "stub",
+      total_balance: 0,
+      total_transactions: 0,
+    });
+  });
+
+  // Minimal transaction stub (safe)
+  app.get("/api/transaction", authMiddleware, (_req, res) => {
+    return ok(res, {
+      data: [],
+      next_page_url: null,
+      prev_page_url: null,
+    });
+  });
+
+  // Module checking stub (safe)
+  app.get("/api/module/checking", authMiddleware, (_req, res) => {
+    return ok(res, { enabled: true });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Auth
+  // ───────────────────────────────────────────────────────────
+  app.post("/api/register", async (req, res, next) => {
+    try {
+      const {
+        firstname,
+        lastname,
+        username,
+        email,
+        country,
+        country_code,
+        phone,
+        phone_code,
+        password,
+        password_confirmation,
+      } = req.body || {};
+
+      if (!firstname || !username || !email || !password || !password_confirmation) {
+        return err(res, "Required fields missing");
+      }
+      if (password !== password_confirmation) {
+        return err(res, "Password confirmation not match");
+      }
+
+      const now = new Date();
+      const doc = {
+        firstname: String(firstname).trim(),
+        lastname: String(lastname || "").trim(),
+        username: String(username).trim(),
+        email: String(email).toLowerCase().trim(),
+        country: country || "",
+        country_code: country_code || "",
+        phone: phone || "",
+        phone_code: phone_code || "",
+        password: await bcrypt.hash(password, 10),
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const result = await users.insertOne(doc);
+      const token = signToken({ ...doc, _id: result.insertedId });
+
+      // Flutter expects token here
+      return res.status(200).json({
+        status: "success",
+        message: "User registered successfully",
+        token,
+      });
+    } catch (e) {
+      if (e?.code === 11000) {
+        const field = Object.keys(e.keyPattern || {})[0] || "field";
+        return err(res, field === "email" ? "Email already exists" : "Username already exists");
+      }
+      return next(e);
+    }
+  });
+
+  app.post("/api/login", async (req, res, next) => {
+    try {
+      const { username, password } = req.body || {};
+      if (!username || !password) {
+        return err(res, "Username and password are required");
+      }
+
+      const login = String(username).trim();
+      const user = await users.findOne({
+        $or: [{ username: login }, { email: login.toLowerCase() }],
+      });
+      if (!user) return err(res, "Invalid credentials");
+
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) return err(res, "Invalid credentials");
+
+      const token = signToken(user);
+
+      return res.json({
+        status: "success",
+        message: "Login successful",
+        token,
+      });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Flutter Profile endpoint (must match your ProfileModel)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/get/account/info", authMiddleware, async (req, res, next) => {
+    try {
+      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+      if (!user) return err(res, "User not found");
+
+      return ok(res, {
+        image: user.image || "",
+        firstName: user.firstname || "",
+        lastName: user.lastname || "",
+        username: user.username || "",
+        email: user.email || "",
+        phoneCode: user.phone_code || "",
+        phone: user.phone || "",
+        country: user.country || "",
+        country_code: user.country_code || "",
+        language: user.language || "",
+        languageId: user.languageId || "",
+        address: user.address || "",
+        join_date: user.createdAt ? new Date(user.createdAt).toISOString() : "",
+      });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // Optional: current user safe endpoint
+  app.get("/api/me", authMiddleware, async (req, res, next) => {
+    try {
+      const user = await users.findOne(
+        { _id: new ObjectId(req.user.id) },
+        { projection: { password: 0 } }
+      );
+      if (!user) return err(res, "User not found");
+      return ok(res, user);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Currency Rate (Home screen)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/currency/rate", authMiddleware, (_req, res) => {
+    return res.json({
+      status: "success",
+      message: {
+        base: "USD",
+        updated_at: new Date().toISOString(),
+        rates: {
+          BTC: 65000,
+          ETH: 3500,
+          SOL: 150,
+          USDT: 1,
+        },
+      },
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Currency List (Popular Currencies UI)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/currency/list", authMiddleware, (_req, res) => {
+    return res.json({
+      status: "success",
+      message: [
+        { id: 1, symbol: "BTC", name: "Bitcoin",  price: 65000, change_24h:  1.2 },
+        { id: 2, symbol: "ETH", name: "Ethereum", price: 3500,  change_24h: -0.6 },
+        { id: 3, symbol: "SOL", name: "Solana",   price: 150,   change_24h:  3.1 },
+        { id: 4, symbol: "USDT",name: "Tether",   price: 1,     change_24h:  0.0 },
+      ],
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Balance (fix $null issue)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/get/balance", authMiddleware, (_req, res) => {
+    return res.json({
+      status: "success",
+      message: {
+        balance: 0,
+        currencySymbol: "$",
+        currency: "USD",
+      },
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Portfolio
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/portfolio", authMiddleware, (_req, res) => {
+    return res.json({
+      status: "success",
+      message: {
+        total_value: 0,
+        items: [],
+      },
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // 404 JSON fallback (prevents HTML responses)
+  // ───────────────────────────────────────────────────────────
+  app.use((req, res) => {
+    return err(res, `Route not found: ${req.method} ${req.originalUrl}`);
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Global error handler (ALWAYS JSON)
+  // ───────────────────────────────────────────────────────────
+  app.use((error, _req, res, _next) => {
+    console.error("[UNHANDLED ERROR]", error);
+    return err(res, "Server error");
+  });
+
+  // Start server
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on http://localhost:${PORT}`);
+  });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    try {
+      console.log("🛑 Shutting down...");
+      await client.close();
+    } finally {
+      process.exit(0);
+    }
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+run().catch((e) => {
+  console.error("❌ Startup failed:", e);
+  process.exit(1);
 });
