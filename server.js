@@ -22,7 +22,7 @@ const MAIL_PASS = process.env.MAIL_PASS || "";
 // In-memory OTP store: key=email, value={code, expiresAt}
 const OTP_STORE = new Map();
 function makeOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(Math.floor(10000 + Math.random() * 90000));
 }
 
 const mailer = nodemailer.createTransport({
