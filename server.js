@@ -4,6 +4,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const speakeasy = require("speakeasy");
+const QRCode = require("qrcode");
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -596,13 +598,133 @@ async function run() {
   });
 
   app.post("/api/sms-verify",   authMiddleware, (_req, res) => ok(res, "SMS verified"));
-  app.post("/api/twoFA-Verify", authMiddleware, (_req, res) => ok(res, "2FA verified"));
-
-  app.get("/api/2FA-security", authMiddleware, (_req, res) => {
-    return ok(res, { twoFactorEnable: false, secret: "", qrCodeUrl: "" });
+  app.post("/api/twoFA-Verify", authMiddleware, async (req, res, next) => {
+    try {
+      const { code } = req.body || {};
+      if (!code) return err(res, "Code is required");
+      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+      if (!user || !user.twoFactorSecret) return err(res, "2FA is not enabled");
+      const verified = speakeasy.totp.verify({
+        secret: user.twoFactorSecret,
+        encoding: "base32",
+        token: String(code).trim(),
+        window: 1,
+      });
+      if (!verified) return err(res, "Invalid 2FA code");
+      return ok(res, "2FA verified successfully");
+    } catch (e) { return next(e); }
   });
-  app.post("/api/2FA-security/enable",  authMiddleware, (_req, res) => ok(res, "2FA enabled"));
-  app.post("/api/2FA-security/disable", authMiddleware, (_req, res) => ok(res, "2FA disabled"));
+
+  // KYC
+  app.get("/api/get/kyc-type", authMiddleware, (_req, res) => {
+    return ok(res, {
+      sumsubStatus: false,
+      sumsubStage: "",
+      kycs: [],
+    });
+  });
+  app.post("/api/kyc/submit", authMiddleware, (_req, res) => ok(res, "KYC submitted successfully"));
+
+  // ───────────────────────────────────────────────────────────
+  // Two Factor Authentication (Google Authenticator / TOTP)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/2FA-security", authMiddleware, async (req, res, next) => {
+    try {
+      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+      if (!user) return err(res, "User not found");
+
+      const isTwoFactorEnabled = user.twoFactorEnabled === true;
+
+      if (isTwoFactorEnabled) {
+        return ok(res, {
+          twoFactorEnable: true,
+          secret: user.twoFactorSecret || "",
+          qrCodeUrl: "",
+        });
+      }
+
+      // Generate a new secret for the user to scan
+      const secret = speakeasy.generateSecret({
+        name: `Coinexia (${user.email})`,
+        length: 20,
+      });
+
+      // Save temp secret (not enabled yet — only saved on enable confirm)
+      await users.updateOne(
+        { _id: new ObjectId(req.user.id) },
+        { $set: { twoFactorTempSecret: secret.base32, updatedAt: new Date() } }
+      );
+
+      const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+
+      return ok(res, {
+        twoFactorEnable: false,
+        secret: secret.base32,
+        qrCodeUrl: qrCodeUrl,
+      });
+    } catch (e) { return next(e); }
+  });
+
+  app.post("/api/2FA-security/enable", authMiddleware, async (req, res, next) => {
+    try {
+      const { code, key } = req.body || {};
+      if (!code || !key) return err(res, "Code and key are required");
+
+      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+      if (!user) return err(res, "User not found");
+
+      // Verify the TOTP code against the provided key
+      const verified = speakeasy.totp.verify({
+        secret: key,
+        encoding: "base32",
+        token: String(code).trim(),
+        window: 1,
+      });
+
+      if (!verified) return err(res, "Invalid authenticator code");
+
+      await users.updateOne(
+        { _id: new ObjectId(req.user.id) },
+        {
+          $set: {
+            twoFactorEnabled: true,
+            twoFactorSecret: key,
+            twoFactorTempSecret: null,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      return ok(res, "Two factor authentication enabled successfully");
+    } catch (e) { return next(e); }
+  });
+
+  app.post("/api/2FA-security/disable", authMiddleware, async (req, res, next) => {
+    try {
+      const { password } = req.body || {};
+      if (!password) return err(res, "Password is required");
+
+      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+      if (!user) return err(res, "User not found");
+
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) return err(res, "Incorrect password");
+
+      await users.updateOne(
+        { _id: new ObjectId(req.user.id) },
+        {
+          $set: {
+            twoFactorEnabled: false,
+            twoFactorSecret: null,
+            twoFactorTempSecret: null,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      return ok(res, "Two factor authentication disabled successfully");
+    } catch (e) { return next(e); }
+  });
 
   // ───────────────────────────────────────────────────────────
   // Balance / Deposit
