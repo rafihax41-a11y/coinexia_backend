@@ -6,6 +6,8 @@ const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() });
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -49,6 +51,87 @@ function ok(res, message) {
 }
 function err(res, message) {
   return res.status(200).json({ status: "error", message });
+}
+
+function buildOtpEmail({ username, code, purpose, expiryMinutes }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>OTP — Coinexia</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f1923 0%,#1a2f1a 100%);padding:36px 40px;text-align:center;">
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+                <tr>
+                  <td style="background:#c6f135;border-radius:10px;padding:10px 22px;">
+                    <span style="font-size:22px;font-weight:800;color:#0f1923;letter-spacing:1px;">COINEXIA</span>
+                  </td>
+                </tr>
+              </table>
+              <p style="color:#a0b0a0;font-size:13px;margin:14px 0 0 0;letter-spacing:0.5px;">Secure · Fast · Reliable</p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:44px 48px 36px 48px;">
+              <p style="margin:0 0 8px 0;font-size:16px;color:#555;">Hello, <strong style="color:#0f1923;">${username}</strong></p>
+              <p style="margin:0 0 28px 0;font-size:15px;color:#666;line-height:1.6;">
+                Here is your One-Time Password to <strong>${purpose}</strong> securely.
+              </p>
+
+              <!-- OTP Box -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center" style="padding:8px 0 32px 0;">
+                    <div style="display:inline-block;background:#f8faf2;border:2px dashed #c6f135;border-radius:12px;padding:22px 48px;">
+                      <p style="margin:0 0 4px 0;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:2px;">Your OTP</p>
+                      <p style="margin:0;font-size:46px;font-weight:800;color:#0f1923;letter-spacing:10px;font-family:'Courier New',monospace;">${code}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Note -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:#fff8e8;border-left:4px solid #f5a623;border-radius:0 8px 8px 0;padding:14px 18px;">
+                    <p style="margin:0;font-size:13px;color:#7a6000;">
+                      ⏱ This OTP is valid for <strong>${expiryMinutes} minutes</strong> only.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:28px 0 0 0;font-size:13px;color:#999;line-height:1.7;">
+                If you did not request this OTP, please disregard this email or contact our support team immediately.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8f9fb;border-top:1px solid #eee;padding:24px 48px;text-align:center;">
+              <p style="margin:0 0 6px 0;font-size:12px;color:#aaa;">&copy; ${new Date().getFullYear()} Coinexia. All rights reserved.</p>
+              <p style="margin:0;font-size:12px;color:#bbb;">This is an automated message — please do not reply.</p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -462,15 +545,20 @@ async function run() {
     if (!user) return err(res, "No account found with this email");
 
     const code = makeOtp();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const expiresAt = Date.now() + 10 * 60 * 1000;
     OTP_STORE.set(String(email).toLowerCase().trim(), { code, expiresAt });
 
     try {
       await mailer.sendMail({
         from: `"Coinexia" <${MAIL_USER}>`,
         to: email,
-        subject: "Password Reset OTP",
-        html: `<h2>Your OTP Code</h2><p>Use this code to reset your password:</p><h1 style="letter-spacing:4px">${code}</h1><p>This code expires in <b>10 minutes</b>.</p>`,
+        subject: "Your Password Reset OTP — Coinexia",
+        html: buildOtpEmail({
+          username: user.firstname || user.username || "User",
+          code,
+          purpose: "reset your password",
+          expiryMinutes: 10,
+        }),
       });
       return ok(res, { message: "OTP sent to your email" });
     } catch (e) {
@@ -517,44 +605,6 @@ async function run() {
     }
   });
 
-  // ───────────────────────────────────────────────────────────
-  // Verification (mail / sms / 2FA / KYC)
-  // ───────────────────────────────────────────────────────────
-  app.get("/api/resend-code", authMiddleware, async (req, res) => {
-    const email = req.user.email;
-    const now = Date.now();
-    const existing = OTP_STORE.get(email);
-
-    // 60-second cooldown (regardless of purpose)
-    if (existing && existing.lastSentAt && (now - existing.lastSentAt) < 60 * 1000) {
-      return err(res, "Please wait before requesting a new code");
-    }
-
-    const code = makeOtp();
-    OTP_STORE.set(email, {
-      code,
-      expiresAt:   now + 10 * 60 * 1000,
-      purpose:     "email_verify",
-      lastSentAt:  now,
-      attempts:    0,
-      blockedUntil: null,
-    });
-
-    try {
-      await mailer.sendMail({
-        from: `"Coinexia" <${MAIL_USER}>`,
-        to: email,
-        subject: "Coinexia Email Verification",
-        html: `<h2>Email Verification</h2><p>Your verification code is:</p><h1 style="letter-spacing:4px">${code}</h1><p>This code expires in <b>10 minutes</b>.</p>`,
-      });
-      return ok(res, { message: "Verification code sent" });
-    } catch (e) {
-      console.error("[MAIL ERROR]", e.message);
-      OTP_STORE.delete(email);
-      return err(res, "Failed to send email. Check server mail config.");
-    }
-  });
-
   app.post("/api/mail-verify", authMiddleware, async (req, res) => {
     const email = req.user.email;
     const { code } = req.body || {};
@@ -567,18 +617,13 @@ async function run() {
 
     const now = Date.now();
 
-    // Brute-force block
     if (stored.blockedUntil && now < stored.blockedUntil) {
       return err(res, "Too many attempts. Try again later");
     }
-
-    // Expiry check
     if (now > stored.expiresAt) {
       OTP_STORE.delete(email);
       return err(res, "Verification code expired. Please resend code");
     }
-
-    // Code mismatch
     if (String(code).trim() !== stored.code) {
       stored.attempts += 1;
       if (stored.attempts >= 5) {
@@ -588,7 +633,6 @@ async function run() {
       return err(res, "Invalid verification code");
     }
 
-    // Success
     await users.updateOne(
       { _id: new ObjectId(req.user.id) },
       { $set: { emailVerified: true, updatedAt: new Date() } }
@@ -597,37 +641,114 @@ async function run() {
     return ok(res, "Email verified successfully");
   });
 
-  app.post("/api/sms-verify",   authMiddleware, (_req, res) => ok(res, "SMS verified"));
-  app.post("/api/twoFA-Verify", authMiddleware, async (req, res, next) => {
+  // ───────────────────────────────────────────────────────────
+  // Resend Verification Code
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/resend-code", authMiddleware, async (req, res) => {
+    const email = req.user.email;
+    const now = Date.now();
+    const existing = OTP_STORE.get(email);
+
+    if (existing && existing.lastSentAt && (now - existing.lastSentAt) < 60 * 1000) {
+      return err(res, "Please wait before requesting a new code");
+    }
+
+    const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+    const code = makeOtp();
+    OTP_STORE.set(email, {
+      code,
+      expiresAt:    now + 10 * 60 * 1000,
+      purpose:      "email_verify",
+      lastSentAt:   now,
+      attempts:     0,
+      blockedUntil: null,
+    });
+
     try {
-      const { code } = req.body || {};
-      if (!code) return err(res, "Code is required");
-      const user = await users.findOne({ _id: new ObjectId(req.user.id) });
-      if (!user || !user.twoFactorSecret) return err(res, "2FA is not enabled");
-      const verified = speakeasy.totp.verify({
-        secret: user.twoFactorSecret,
-        encoding: "base32",
-        token: String(code).trim(),
-        window: 1,
+      await mailer.sendMail({
+        from: `"Coinexia" <${MAIL_USER}>`,
+        to: email,
+        subject: "Your Email Verification OTP — Coinexia",
+        html: buildOtpEmail({
+          username: user?.firstname || user?.username || "User",
+          code,
+          purpose: "verify your email address",
+          expiryMinutes: 10,
+        }),
       });
-      if (!verified) return err(res, "Invalid 2FA code");
-      return ok(res, "2FA verified successfully");
-    } catch (e) { return next(e); }
+      return ok(res, { message: "Verification code sent" });
+    } catch (e) {
+      console.error("[MAIL ERROR]", e.message);
+      OTP_STORE.delete(email);
+      return err(res, "Failed to send email. Check server mail config.");
+    }
   });
 
   // KYC
-  app.get("/api/get/kyc-type", authMiddleware, (_req, res) => {
+  app.get("/api/get/kyc-type", authMiddleware, async (req, res) => {
+    const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+    const kycStatus = user?.kycStatus || "unverified"; // unverified | pending | verified
+
     return ok(res, {
       sumsubStatus: false,
       sumsubStage: "",
-      kycs: [],
+      kycs: [
+        {
+          id: 1,
+          name: "National ID Verification",
+          slug: "nid-verification",
+          stage: kycStatus,
+          input_form: {
+            full_name: {
+              field_name: "full_name",
+              field_label: "Full Name",
+              type: "text",
+              validation: "required",
+            },
+            date_of_birth: {
+              field_name: "date_of_birth",
+              field_label: "Date of Birth",
+              type: "date",
+              validation: "required",
+            },
+            nid_number: {
+              field_name: "nid_number",
+              field_label: "NID Number",
+              type: "text",
+              validation: "required",
+            },
+            nid_front: {
+              field_name: "nid_front",
+              field_label: "NID Front Photo",
+              type: "file",
+              validation: "required",
+            },
+            nid_back: {
+              field_name: "nid_back",
+              field_label: "NID Back Photo",
+              type: "file",
+              validation: "required",
+            },
+          },
+        },
+      ],
     });
   });
-  app.post("/api/kyc/submit", authMiddleware, (_req, res) => ok(res, "KYC submitted successfully"));
 
-  // ───────────────────────────────────────────────────────────
-  // Two Factor Authentication (Google Authenticator / TOTP)
-  // ───────────────────────────────────────────────────────────
+  app.post("/api/kyc/submit", authMiddleware, upload.any(), async (req, res) => {
+    try {
+      const fields = req.body || {};
+      await users.updateOne(
+        { _id: new ObjectId(req.user.id) },
+        { $set: { kycStatus: "pending", kycData: fields, kycSubmittedAt: new Date(), updatedAt: new Date() } }
+      );
+      return ok(res, "Verification submitted successfully. Under review.");
+    } catch (e) {
+      console.error("[KYC ERROR]", e.message);
+      return err(res, "Failed to submit KYC");
+    }
+  });
+
   app.get("/api/2FA-security", authMiddleware, async (req, res, next) => {
     try {
       const user = await users.findOne({ _id: new ObjectId(req.user.id) });
@@ -643,23 +764,34 @@ async function run() {
         });
       }
 
-      // Generate a new secret for the user to scan
-      const secret = speakeasy.generateSecret({
-        name: `Coinexia (${user.email})`,
-        length: 20,
-      });
+      // Reuse existing temp secret if already generated — prevents QR becoming stale on re-open
+      let base32Secret = user.twoFactorTempSecret || null;
+      let otpauthUrl;
 
-      // Save temp secret (not enabled yet — only saved on enable confirm)
-      await users.updateOne(
-        { _id: new ObjectId(req.user.id) },
-        { $set: { twoFactorTempSecret: secret.base32, updatedAt: new Date() } }
-      );
+      if (base32Secret) {
+        otpauthUrl = speakeasy.otpauthURL({
+          secret: base32Secret,
+          label: encodeURIComponent(`Coinexia (${user.email})`),
+          encoding: "base32",
+        });
+      } else {
+        const secret = speakeasy.generateSecret({
+          name: `Coinexia (${user.email})`,
+          length: 20,
+        });
+        base32Secret = secret.base32;
+        otpauthUrl   = secret.otpauth_url;
+        await users.updateOne(
+          { _id: new ObjectId(req.user.id) },
+          { $set: { twoFactorTempSecret: base32Secret, updatedAt: new Date() } }
+        );
+      }
 
-      const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+      const qrCodeUrl = await QRCode.toDataURL(otpauthUrl);
 
       return ok(res, {
         twoFactorEnable: false,
-        secret: secret.base32,
+        secret: base32Secret,
         qrCodeUrl: qrCodeUrl,
       });
     } catch (e) { return next(e); }
@@ -678,7 +810,7 @@ async function run() {
         secret: key,
         encoding: "base32",
         token: String(code).trim(),
-        window: 1,
+        window: 4,
       });
 
       if (!verified) return err(res, "Invalid authenticator code");
@@ -882,6 +1014,24 @@ async function run() {
   app.get("/api/funds",    authMiddleware, (_req, res) => ok(res, { data: [] }));
   app.post("/api/funds",   authMiddleware, (_req, res) => ok(res, "Request submitted"));
   app.get("/api/tracking", authMiddleware, (_req, res) => ok(res, { data: [] }));
+
+  // ───────────────────────────────────────────────────────────
+  // 2FA Debug — shows current expected TOTP token (dev only)
+  // ───────────────────────────────────────────────────────────
+  app.get("/api/2FA-debug", authMiddleware, async (req, res) => {
+    const user = await users.findOne({ _id: new ObjectId(req.user.id) });
+    const secret = user?.twoFactorSecret || user?.twoFactorTempSecret;
+    if (!secret) return err(res, "No 2FA secret found for this user");
+    const currentToken = speakeasy.totp({
+      secret,
+      encoding: "base32",
+    });
+    return ok(res, {
+      current_token: currentToken,
+      secret_snippet: secret.slice(0, 6) + "...",
+      server_time: new Date().toISOString(),
+    });
+  });
 
   // ───────────────────────────────────────────────────────────
   // 404 JSON fallback (prevents HTML responses)
